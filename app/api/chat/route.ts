@@ -43,7 +43,6 @@ async function searchBrave(query: string): Promise<{ results: string; source: st
     const res = await fetch(url, {
       headers: {
         Accept: 'application/json',
-        'Accept-Encoding': 'gzip',
         'X-Subscription-Token': apiKey,
       },
       signal: AbortSignal.timeout(8000),
@@ -51,7 +50,8 @@ async function searchBrave(query: string): Promise<{ results: string; source: st
 
     if (!res.ok) return { results: `Search unavailable (${res.status})`, source: 'error' }
 
-    const data = await res.json()
+    const text = await res.text()
+    const data = JSON.parse(text)
     const hits = (data.web?.results ?? []).slice(0, 5)
     if (!hits.length) return { results: '', source: 'empty' }
 
