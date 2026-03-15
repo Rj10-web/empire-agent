@@ -6,10 +6,20 @@ import type { Message } from '@/lib/types'
 import Dashboard from '@/components/Dashboard'
 import SkillsDashboard from '@/components/SkillsDashboard'
 import { findSkill, SKILLS_REGISTRY } from '@/lib/skills-registry'
-import { Send, ChevronDown, Zap } from 'lucide-react'
+import {
+  loadMemories,
+  saveMemory,
+  deleteMemory,
+  formatMemoriesForPrompt,
+  parseMemoryCommands,
+  detectRememberRequest,
+  type MemoryEntry,
+} from '@/lib/memory'
+import { Send, ChevronDown, Zap, Brain, X, Trash2 } from 'lucide-react'
 
 function formatMarkdown(text: string): string {
   return text
+    .replace(/\[REMEMBER:[^\]]+\]/gi, '') // Strip memory commands from display
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
@@ -32,7 +42,6 @@ function formatMarkdown(text: string): string {
     .replace(/<p>(<[a-z])/g, '$1')
 }
 
-// Detect "use [skill-name]" pattern and extract skill
 function detectSkillCommand(text: string): string | null {
   const match = text.match(/^use\s+([\w-]+)/i)
   return match ? match[1].toLowerCase() : null
@@ -48,11 +57,19 @@ export default function Home() {
   const [showDashboard, setShowDashboard] = useState(true)
   const [dashboardOpen, setDashboardOpen] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('chat')
+  const [memories, setMemories] = useState<MemoryEntry[]>([])
+  const [showMemory, setShowMemory] = useState(false)
+  const [memoryNotification, setMemoryNotification] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   const agent = AGENTS.find(a => a.id === activeAgent) ?? AGENTS[0]
+
+  // Load memories from localStorage on mount
+  useEffect(() => {
+    setMemories(loadMemories())
+  }, [])
 
   // Responsive layout
   useEffect(() => {
@@ -73,6 +90,23 @@ export default function Home() {
     ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'
   }
 
+  const showMemoryNotif = (text: string) => {
+    setMemoryNotification(text)
+    setTimeout(() => setMemoryNotification(null), 3000)
+  }
+
+  const handleSaveMemory = (key: string, value: string, category: MemoryEntry['category'] = 'fact') => {
+    const entry = saveMemory({ key, value, category, agentId: activeAgent })
+    setMemories(loadMemories())
+    showMemoryNotif(`Remembered: "${key}"`)
+    return entry
+  }
+
+  const handleDeleteMemory = (id: string) => {
+    deleteMemory(id)
+    setMemories(loadMemories())
+  }
+
   const switchAgent = (id: string) => {
     setActiveAgent(id)
     setMessages([])
@@ -84,13 +118,35 @@ export default function Home() {
     const rawContent = (text ?? input).trim()
     if (!rawContent || isStreaming) return
 
+    // Check for explicit remember request
+    const rememberReq = detectRememberRequest(rawContent)
+    if (rememberReq) {
+      handleSaveMemory(rememberReq.key, rememberReq.value, 'fact')
+      const userMsg: Message = {
+        id: Date.now().toString(),
+        role: 'user',
+        content: rawContent,
+        timestamp: new Date(),
+        agentId: activeAgent,
+      }
+      const ackMsg: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: `Got it. I'll remember that **${rememberReq.key}** is **${rememberReq.value}**. This is saved to my memory and will persist across all future conversations.`,
+        timestamp: new Date(),
+        agentId: activeAgent,
+      }
+      setMessages(prev => [...prev, userMsg, ackMsg])
+      setInput('')
+      return
+    }
+
     // Check for skill command: "use [skill-name]"
     const skillCmd = detectSkillCommand(rawContent)
     if (skillCmd) {
       const skill = findSkill(skillCmd)
       if (skill) {
-        // Inject skill context into the message
-        const skillEnrichedContent = `[Using skill: ${skill.id}]\n\nSkill: **${skill.name}**\nDescription: ${skill.description}\n\nApply this skill's methodology and expertise to help me with: ${rawContent.replace(/^use\s+[\w-]+\s*/i, '') || skill.name}`
+        const skillEnrichedContent = `[Using skill: ${skill.id}] Apply the methodology and expertise of the "${skill.name}" skill. Description: ${skill.description}\n\nTask: ${rawContent.replace(/^use\s+[\w-]+\s*/i, '') || `Help me with ${skill.name}`}`
         return sendMessage(skillEnrichedContent)
       }
     }
@@ -124,11 +180,19 @@ export default function Home() {
       content: m.content,
     }))
 
+    // Format memories for injection
+    const currentMemories = loadMemories()
+    const memoryText = formatMemoriesForPrompt(currentMemories)
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: history, agentId: activeAgent }),
+        body: JSON.stringify({
+          messages: history,
+          agentId: activeAgent,
+          memories: memoryText,
+        }),
         signal: abortRef.current.signal,
       })
 
@@ -162,6 +226,12 @@ export default function Home() {
           } catch { /* skip malformed */ }
         }
       }
+
+      // Parse memory commands from AI response
+      const memCmds = parseMemoryCommands(fullContent)
+      for (const cmd of memCmds) {
+        handleSaveMemory(cmd.key, cmd.value, cmd.category)
+      }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') return
       setMessages(prev => prev.map(m =>
@@ -172,6 +242,7 @@ export default function Home() {
     } finally {
       setIsStreaming(false)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input, messages, activeAgent, isStreaming])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -181,7 +252,7 @@ export default function Home() {
     }
   }
 
-  const handleUseSkill = (skillId: string, skillName: string) => {
+  const handleUseSkill = (skillId: string) => {
     setViewMode('chat')
     setInput(`use ${skillId} `)
     setTimeout(() => textareaRef.current?.focus(), 100)
@@ -189,9 +260,15 @@ export default function Home() {
 
   return (
     <div className="flex flex-col h-screen bg-[#080810] text-white overflow-hidden">
+      {/* Memory Notification */}
+      {memoryNotification && (
+        <div className="fixed top-4 right-4 z-50 bg-[#FFD700] text-black text-xs font-bold px-4 py-2 rounded-xl shadow-lg animate-[fadeIn_0.2s_ease-out]">
+          🧠 {memoryNotification}
+        </div>
+      )}
+
       {/* TOP NAV */}
       <header className="flex-shrink-0 bg-[#0f0f1a] border-b border-[#1e1e38] px-3 py-2 flex items-center gap-2">
-        {/* Logo */}
         <div className="w-8 h-8 rounded-lg flex items-center justify-center font-black text-sm flex-shrink-0"
           style={{ background: 'linear-gradient(135deg, #00AEEF, #FFD700)', color: '#000' }}>
           R
@@ -229,9 +306,23 @@ export default function Home() {
           >
             <Zap size={12} />
             <span className="hidden sm:block">Skills</span>
-            <span className="text-xs opacity-70">({SKILLS_REGISTRY.length})</span>
+            <span className="opacity-70">({SKILLS_REGISTRY.length})</span>
           </button>
         </div>
+
+        {/* Memory Button */}
+        <button
+          onClick={() => setShowMemory(!showMemory)}
+          className={`flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs transition-all ${
+            showMemory ? 'bg-[#FFD70033] text-[#FFD700] border border-[#FFD70044]' : 'bg-[#16162a] text-gray-500 hover:text-white'
+          }`}
+          title="Memory"
+        >
+          <Brain size={13} />
+          {memories.length > 0 && (
+            <span className="text-[#FFD700] font-bold">{memories.length}</span>
+          )}
+        </button>
 
         {/* Dashboard toggle (mobile) */}
         <button
@@ -241,7 +332,6 @@ export default function Home() {
           📊 <ChevronDown size={12} className={`transition-transform ${dashboardOpen ? 'rotate-180' : ''}`} />
         </button>
 
-        {/* Status */}
         <div className="items-center gap-1.5 text-xs text-gray-500 hidden md:flex flex-shrink-0">
           <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
           <span>Online</span>
@@ -258,22 +348,60 @@ export default function Home() {
       {/* MAIN CONTENT */}
       <div className="flex flex-1 overflow-hidden">
 
-        {/* LEFT PANEL: Chat or Skills */}
+        {/* LEFT: Chat or Skills */}
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
 
           {viewMode === 'skills' ? (
-            /* SKILLS DASHBOARD */
             <SkillsDashboard onUseSkill={handleUseSkill} />
           ) : (
             <>
               {/* Agent Header */}
               <div className="flex-shrink-0 px-4 py-3 bg-[#0f0f1a] border-b border-[#1e1e38] flex items-center gap-3">
                 <span className="text-2xl">{agent.icon}</span>
-                <div>
+                <div className="flex-1">
                   <div className="font-bold text-sm" style={{ color: agent.color }}>{agent.name}</div>
                   <div className="text-xs text-gray-500">{agent.tagline}</div>
                 </div>
+                {memories.length > 0 && (
+                  <div className="text-xs text-[#FFD700] bg-[#FFD70011] border border-[#FFD70022] px-2 py-1 rounded-lg">
+                    🧠 {memories.length} memories loaded
+                  </div>
+                )}
               </div>
+
+              {/* Memory Panel (inline) */}
+              {showMemory && (
+                <div className="flex-shrink-0 border-b border-[#1e1e38] bg-[#0d0d1a] max-h-48 overflow-y-auto">
+                  <div className="px-4 py-2 flex items-center justify-between">
+                    <span className="text-xs font-semibold text-[#FFD700]">🧠 Memory ({memories.length} entries)</span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { if (window.confirm('Clear all memories?')) { localStorage.removeItem('empire_agent_memory'); setMemories([]) } }}
+                        className="text-xs text-gray-600 hover:text-red-400 flex items-center gap-1"
+                      >
+                        <Trash2 size={11} /> Clear all
+                      </button>
+                      <button onClick={() => setShowMemory(false)} className="text-gray-600 hover:text-white">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                  {memories.length === 0 ? (
+                    <p className="px-4 pb-3 text-xs text-gray-600">No memories yet. Tell me something to remember: &quot;Remember that my client is called Apex Digital&quot;</p>
+                  ) : (
+                    <div className="px-4 pb-3 flex flex-wrap gap-2">
+                      {memories.map(m => (
+                        <div key={m.id} className="flex items-center gap-1.5 bg-[#16162a] border border-[#1e1e38] rounded-lg px-2 py-1">
+                          <span className="text-xs text-gray-400"><strong className="text-white">{m.key}:</strong> {m.value.slice(0, 40)}{m.value.length > 40 ? '...' : ''}</span>
+                          <button onClick={() => handleDeleteMemory(m.id)} className="text-gray-700 hover:text-red-400 ml-1">
+                            <X size={10} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Messages */}
               <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
@@ -284,7 +412,6 @@ export default function Home() {
                       <p className="font-bold text-lg" style={{ color: agent.color }}>{agent.name}</p>
                       <p className="text-gray-500 text-sm mt-1">{agent.tagline}</p>
                     </div>
-                    {/* Quick suggestions */}
                     <div className="flex flex-wrap gap-2 justify-center max-w-lg">
                       {agent.suggestions.map((s, i) => (
                         <button
@@ -296,10 +423,10 @@ export default function Home() {
                         </button>
                       ))}
                     </div>
-                    {/* Skills hint */}
-                    <p className="text-xs text-gray-700">
-                      💡 Type <code className="text-[#FFD700] bg-[#16162a] px-1 rounded">use [skill-name]</code> to activate any of {SKILLS_REGISTRY.length} installed skills
-                    </p>
+                    <div className="flex flex-col gap-1 text-xs text-gray-700">
+                      <p>💡 Type <code className="text-[#FFD700] bg-[#16162a] px-1 rounded">use [skill-name]</code> to activate any of {SKILLS_REGISTRY.length} skills</p>
+                      <p>🧠 Type <code className="text-[#FFD700] bg-[#16162a] px-1 rounded">remember [thing] is [value]</code> for persistent memory</p>
+                    </div>
                   </div>
                 )}
 
@@ -313,9 +440,7 @@ export default function Home() {
                     )}
                     <div
                       className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                        msg.role === 'user'
-                          ? 'text-white rounded-tr-sm'
-                          : 'text-gray-200 rounded-tl-sm'
+                        msg.role === 'user' ? 'text-white rounded-tr-sm' : 'text-gray-200 rounded-tl-sm'
                       } ${msg.role === 'assistant' && !msg.content ? 'typing-cursor' : ''}`}
                       style={msg.role === 'user'
                         ? { background: `linear-gradient(135deg, ${agent.color}cc, ${agent.color}99)`, color: '#000', fontWeight: 500 }
@@ -345,7 +470,7 @@ export default function Home() {
                       value={input}
                       onChange={(e) => { setInput(e.target.value); autoResize() }}
                       onKeyDown={handleKeyDown}
-                      placeholder={`Message ${agent.name}… or type "use [skill-name]"`}
+                      placeholder={`Message ${agent.name}… or "use [skill]" or "remember [thing] is [value]"`}
                       rows={1}
                       className="w-full bg-[#16162a] border border-[#1e1e38] rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 resize-none outline-none focus:border-[#00AEEF] transition-colors"
                       style={{ minHeight: '44px', maxHeight: '160px' }}
@@ -372,7 +497,7 @@ export default function Home() {
                   </button>
                 </div>
                 <p className="text-center text-xs text-gray-700 mt-2">
-                  Powered by Groq/Gemini/Claude • Enter to send • <span className="text-[#FFD700]">use [skill]</span> to activate {SKILLS_REGISTRY.length} skills
+                  Twin of Claude Code • Groq free AI • {memories.length} memories • {SKILLS_REGISTRY.length} skills
                 </p>
               </div>
             </>
