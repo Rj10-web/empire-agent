@@ -1,0 +1,145 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --cyan: #00AEEF;
+  --gold: #FFD700;
+  --dark-base: #080810;
+  --dark-surface: #0f0f1a;
+  --dark-elevated: #16162a;
+  --dark-border: #1e1e38;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--dark-base);
+  color: #e0e0e0;
+  overflow: hidden;
+  height: 100vh;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--dark-surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--dark-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cyan);
+}
+
+/* Glow effects */
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(0, 174, 239, 0.3);
+}
+.glow-gold {
+  box-shadow: 0 0 20px rgba(255, 215, 0, 0.3);
+}
+
+/* Markdown styles in chat */
+.prose-empire h1, .prose-empire h2, .prose-empire h3 {
+  color: #00AEEF;
+  font-weight: 700;
+  margin: 0.75rem 0 0.5rem;
+}
+.prose-empire strong {
+  color: #FFD700;
+}
+.prose-empire ul, .prose-empire ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+}
+.prose-empire li {
+  margin: 0.25rem 0;
+}
+.prose-empire code {
+  background: rgba(0, 174, 239, 0.15);
+  color: #00AEEF;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 0.85em;
+}
+.prose-empire pre {
+  background: #0f0f1a;
+  border: 1px solid #1e1e38;
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+.prose-empire p {
+  margin: 0.4rem 0;
+  line-height: 1.6;
+}
+.prose-empire blockquote {
+  border-left: 3px solid #00AEEF;
+  padding-left: 1rem;
+  color: #aaa;
+  font-style: italic;
+  margin: 0.5rem 0;
+}
+.prose-empire hr {
+  border-color: #1e1e38;
+  margin: 1rem 0;
+}
+.prose-empire a {
+  color: #00AEEF;
+  text-decoration: underline;
+}
+.prose-empire table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin: 0.75rem 0;
+}
+.prose-empire th {
+  background: #0f0f1a;
+  color: #00AEEF;
+  padding: 0.4rem 0.75rem;
+  text-align: left;
+  border: 1px solid #1e1e38;
+}
+.prose-empire td {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid #1e1e38;
+}
+.prose-empire tr:nth-child(even) td {
+  background: rgba(255,255,255,0.02);
+}
+
+/* Typing cursor animation */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+.typing-cursor::after {
+  content: '▋';
+  animation: blink 1s infinite;
+  color: #00AEEF;
+}
+
+/* Stat number animation */
+@keyframes countUp {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.stat-animate {
+  animation: countUp 0.5s ease-out forwards;
+}
+
+/* Mobile safe area */
+@supports (padding: max(0px)) {
+  .pb-safe {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+}
