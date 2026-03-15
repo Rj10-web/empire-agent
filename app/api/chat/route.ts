@@ -1,15 +1,7 @@
 import { NextRequest } from 'next/server'
-import OpenAI from 'openai'
 import { getAgent } from '@/lib/agents'
-
-const client = new OpenAI({
-  baseURL: 'https://openrouter.ai/api/v1',
-  apiKey: process.env.OPENROUTER_API_KEY,
-  defaultHeaders: {
-    'HTTP-Referer': 'https://empire-agent.vercel.app',
-    'X-Title': 'Empire Agent',
-  },
-})
+import { getBestProvider } from '@/lib/ai-provider'
+import { getDemoResponse } from '@/lib/demo-responses'
 
 export async function POST(req: NextRequest) {
   try {
@@ -20,12 +12,48 @@ export async function POST(req: NextRequest) {
     }
 
     const agent = getAgent(agentId ?? 'empire')
+    const provider = getBestProvider()
+    const encoder = new TextEncoder()
 
-    const model = agentId === 'researcher' || agentId === 'cinematic'
-      ? 'anthropic/claude-opus-4-6'
-      : 'anthropic/claude-sonnet-4-6'
+    // Demo mode — no API key configured
+    if (!provider) {
+      const demoText = getDemoResponse(agentId ?? 'empire')
+      const words = demoText.split(' ')
 
-    const stream = await client.chat.completions.create({
+      const readable = new ReadableStream({
+        async start(controller) {
+          // Stream demo response word by word
+          for (const word of words) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ text: word + ' ' })}\n\n`),
+            )
+            await new Promise((r) => setTimeout(r, 30))
+          }
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ text: '\n\n---\n*Demo mode — add GROQ_API_KEY to Vercel for live AI. Free at console.groq.com*' })}\n\n`,
+            ),
+          )
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+          controller.close()
+        },
+      })
+
+      return new Response(readable, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        },
+      })
+    }
+
+    // Pick model based on agent and provider
+    const useSmart = agentId === 'researcher' || agentId === 'cinematic'
+    const model = useSmart ? provider.models.smart : provider.models.fast
+
+    const stream = await provider.client.chat.completions.create({
       model,
       messages: [
         { role: 'system', content: agent.systemPrompt },
@@ -39,7 +67,6 @@ export async function POST(req: NextRequest) {
       temperature: 0.8,
     })
 
-    const encoder = new TextEncoder()
     const readable = new ReadableStream({
       async start(controller) {
         try {
@@ -51,7 +78,9 @@ export async function POST(req: NextRequest) {
           }
           controller.enqueue(encoder.encode('data: [DONE]\n\n'))
         } catch (err) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: String(err) })}\n\n`))
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ error: String(err) })}\n\n`),
+          )
         } finally {
           controller.close()
         }
@@ -64,11 +93,12 @@ export async function POST(req: NextRequest) {
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
+        'X-Provider': provider.name,
       },
     })
   } catch (err) {
     console.error('Chat API error:', err)
-    return new Response(JSON.stringify({ error: 'Failed to start stream' }), {
+    return new Response(JSON.stringify({ error: 'Failed to start stream', detail: String(err) }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     })
