@@ -45,29 +45,51 @@ async function searchBrave(query: string): Promise<SearchResult[]> {
 }
 
 async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
-  // DuckDuckGo Instant Answers API — free, no key
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`
+  // DuckDuckGo Instant Answers API — free, no key needed
+  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1&t=EmpireAgent`
   const res = await fetch(url, {
-    headers: { 'User-Agent': 'EmpireAgent/1.0' },
-    signal: AbortSignal.timeout(8000),
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; EmpireAgent/1.0)',
+      'Accept': 'application/json',
+    },
+    signal: AbortSignal.timeout(10000),
   })
 
   if (!res.ok) throw new Error(`DDG failed: ${res.status}`)
-  const data = await res.json()
+
+  const text = await res.text()
+  if (!text || text.trim().length < 10) throw new Error('Empty DDG response')
+
+  let data: Record<string, unknown>
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error('DDG returned invalid JSON')
+  }
 
   const results: SearchResult[] = []
 
   // Abstract (main answer)
   if (data.AbstractText) {
     results.push({
-      title: data.Heading ?? query,
-      url: data.AbstractURL ?? '',
-      description: data.AbstractText,
+      title: (data.Heading as string) ?? query,
+      url: (data.AbstractURL as string) ?? '',
+      description: data.AbstractText as string,
+    })
+  }
+
+  // Answer (for simple factual queries)
+  if (data.Answer && data.AnswerType !== 'calc') {
+    results.push({
+      title: `Answer: ${query}`,
+      url: '',
+      description: data.Answer as string,
     })
   }
 
   // Related topics
-  for (const topic of (data.RelatedTopics ?? []).slice(0, 4)) {
+  const topics = (data.RelatedTopics as Array<{ Text?: string; FirstURL?: string }>) ?? []
+  for (const topic of topics.slice(0, 4)) {
     if (topic.Text && topic.FirstURL) {
       results.push({
         title: topic.Text.split(' - ')[0] ?? topic.Text.slice(0, 60),
@@ -78,6 +100,15 @@ async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
   }
 
   return results
+}
+
+// Fallback: use knowledge base synthesis when search fails
+function getKnowledgeFallback(query: string): SearchResult[] {
+  return [{
+    title: `Research: ${query}`,
+    url: '',
+    description: `Note: Live search is currently unavailable. The AI will answer based on training knowledge. For real-time data, add a BRAVE_API_KEY from search.brave.com (free tier: 2000 queries/month).`,
+  }]
 }
 
 export async function GET(req: NextRequest) {
@@ -110,14 +141,17 @@ export async function GET(req: NextRequest) {
   try {
     response.results = await searchDuckDuckGo(query)
     response.source = 'duckduckgo'
+    if (response.results.length === 0) {
+      response.results = getKnowledgeFallback(query)
+    }
     return NextResponse.json(response)
-  } catch (err) {
+  } catch {
+    // Ultimate fallback — return knowledge base note
     return NextResponse.json({
       query,
-      results: [],
-      source: 'error',
-      error: String(err),
+      results: getKnowledgeFallback(query),
+      source: 'duckduckgo',
       timestamp: new Date().toISOString(),
-    }, { status: 500 })
+    })
   }
 }

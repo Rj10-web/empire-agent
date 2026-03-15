@@ -25,8 +25,10 @@ const SEARCH_TOOL = {
 
 async function executeSearch(query: string): Promise<string> {
   try {
-    const baseUrl = process.env.VERCEL_URL
-      ? `https://${process.env.VERCEL_URL}`
+    // Use Vercel deployment URL or localhost for self-calling
+    const vercelUrl = process.env.VERCEL_URL ?? process.env.NEXT_PUBLIC_VERCEL_URL
+    const baseUrl = vercelUrl
+      ? (vercelUrl.startsWith('http') ? vercelUrl : `https://${vercelUrl}`)
       : 'http://localhost:3000'
 
     const res = await fetch(`${baseUrl}/api/search?q=${encodeURIComponent(query)}`, {
