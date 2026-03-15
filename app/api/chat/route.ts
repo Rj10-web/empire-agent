@@ -4,64 +4,64 @@ import { getBestProvider } from '@/lib/ai-provider'
 import { getDemoResponse } from '@/lib/demo-responses'
 import { MEMORY_SYSTEM_PROMPT } from '@/lib/roobmy-context'
 
-// Keywords that always trigger a real-time search
+// Keywords that trigger auto-search for the researcher agent
 const SEARCH_TRIGGERS = [
-  'this week', 'today', 'recent', 'latest', 'posted', 'just', 'now',
-  'trending', 'right now', 'currently', 'new', '2026', 'this month',
-  'what did', 'what is', 'what are', 'find me', 'search for', 'look up',
+  'this week', 'today', 'recent', 'latest', 'posted', 'just posted',
+  'right now', 'currently', 'this month', 'trending', '2026',
+  'what did', 'what is', 'what are', 'find me', 'search', 'look up',
 ]
 
-// Agents that should always search for external queries
-const SEARCH_AGENTS = ['researcher']
+const SEARCH_AGENTS = new Set(['researcher'])
 
-function shouldAutoSearch(agentId: string, userMessage: string): boolean {
-  const msg = userMessage.toLowerCase()
-  if (SEARCH_AGENTS.includes(agentId)) {
-    return SEARCH_TRIGGERS.some(t => msg.includes(t))
+function shouldAutoSearch(agentId: string, msg: string): boolean {
+  const lower = msg.toLowerCase()
+  if (SEARCH_AGENTS.has(agentId)) {
+    return SEARCH_TRIGGERS.some((t) => lower.includes(t))
   }
-  // Other agents search if explicitly asked
-  return msg.startsWith('search') || msg.startsWith('look up') || msg.startsWith('find me')
+  return lower.startsWith('search') || lower.startsWith('look up') || lower.startsWith('find me')
 }
 
-function buildSearchQuery(userMessage: string, agentId: string): string {
-  // Clean up the user message into a good search query
-  const msg = userMessage
+function buildSearchQuery(msg: string, agentId: string): string {
+  const cleaned = msg
     .replace(/^(search for|look up|find me|what did|what is|what are)\s+/i, '')
-    .replace(/\?$/, '')
+    .replace(/[?!]$/, '')
     .trim()
-
-  // Add context for researcher agent
-  if (agentId === 'researcher') {
-    if (!msg.includes('2026') && !msg.includes('week') && !msg.includes('today')) {
-      return `${msg} 2026`
-    }
+  // Add recency context for researcher queries
+  if (SEARCH_AGENTS.has(agentId) && !cleaned.match(/\b(2026|week|today|month)\b/i)) {
+    return `${cleaned} 2026`
   }
-  return msg
+  return cleaned
 }
 
-async function executeSearch(query: string): Promise<{ results: string; source: string }> {
-  try {
-    const vercelUrl = process.env.VERCEL_URL ?? process.env.NEXT_PUBLIC_VERCEL_URL
-    const baseUrl = vercelUrl
-      ? (vercelUrl.startsWith('http') ? vercelUrl : `https://${vercelUrl}`)
-      : 'http://localhost:3000'
+// Direct Brave Search call — no HTTP self-calling
+async function searchBrave(query: string): Promise<{ results: string; source: string }> {
+  const apiKey = process.env.BRAVE_API_KEY
+  if (!apiKey) return { results: '', source: 'no_key' }
 
-    const res = await fetch(`${baseUrl}/api/search?q=${encodeURIComponent(query)}`, {
-      signal: AbortSignal.timeout(10000),
+  try {
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5&search_lang=en`
+    const res = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        'Accept-Encoding': 'gzip',
+        'X-Subscription-Token': apiKey,
+      },
+      signal: AbortSignal.timeout(8000),
     })
 
-    if (!res.ok) return { results: `Search failed: ${res.status}`, source: 'error' }
+    if (!res.ok) return { results: `Search unavailable (${res.status})`, source: 'error' }
 
     const data = await res.json()
-    if (!data.results?.length) return { results: `No results found for: ${query}`, source: 'none' }
+    const hits = (data.web?.results ?? []).slice(0, 5)
+    if (!hits.length) return { results: '', source: 'empty' }
 
-    const formatted = data.results
-      .map((r: { title: string; url: string; description: string }, i: number) =>
-        `[${i + 1}] ${r.title}\n${r.description}\nSource: ${r.url}`,
+    const formatted = hits
+      .map((r: { title?: string; description?: string; url?: string }, i: number) =>
+        `[${i + 1}] ${r.title ?? ''}\n${r.description ?? ''}\nURL: ${r.url ?? ''}`,
       )
       .join('\n\n')
 
-    return { results: formatted, source: data.source }
+    return { results: formatted, source: 'brave' }
   } catch (err) {
     return { results: `Search error: ${String(err)}`, source: 'error' }
   }
@@ -79,12 +79,9 @@ export async function POST(req: NextRequest) {
     const provider = getBestProvider()
     const encoder = new TextEncoder()
 
-    // Build system prompt with memory context
-    const memoryContext = memories && memories.length > 0
-      ? MEMORY_SYSTEM_PROMPT(memories)
-      : ''
+    const memoryContext = memories && memories.length > 0 ? MEMORY_SYSTEM_PROMPT(memories) : ''
 
-    // Demo mode — no API key configured
+    // Demo mode
     if (!provider) {
       const demoText = getDemoResponse(agentId ?? 'empire')
       const words = demoText.split(' ')
@@ -94,7 +91,7 @@ export async function POST(req: NextRequest) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: word + ' ' })}\n\n`))
             await new Promise((r) => setTimeout(r, 25))
           }
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: '\n\n---\n*Demo mode — add GROQ_API_KEY at console.groq.com (free) to unlock full AI*' })}\n\n`))
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: '\n\n---\n*Demo mode — add GROQ_API_KEY at console.groq.com to unlock full AI*' })}\n\n`))
           controller.enqueue(encoder.encode('data: [DONE]\n\n'))
           controller.close()
         },
@@ -104,23 +101,27 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // Pick model based on agent
     const useSmart = agentId === 'researcher' || agentId === 'cinematic'
     const model = useSmart ? provider.models.smart : provider.models.fast
 
-    // Get the last user message for search detection
-    const lastUserMsg = [...messages].reverse().find((m: { role: string }) => m.role === 'user')
-    const userText = lastUserMsg?.content ?? ''
+    // Get last user message for search detection
+    const userText = [...messages].reverse().find((m: { role: string }) => m.role === 'user')?.content ?? ''
 
-    // Pre-search: inject real-time results before AI generates response
+    // Auto-search: call Brave directly (no HTTP self-call)
     let searchContext = ''
     let searchSource = ''
     if (shouldAutoSearch(agentId ?? 'empire', userText)) {
-      const searchQuery = buildSearchQuery(userText, agentId ?? 'empire')
-      const { results, source } = await executeSearch(searchQuery)
+      const query = buildSearchQuery(userText, agentId ?? 'empire')
+      const { results, source } = await searchBrave(query)
       searchSource = source
-      if (source !== 'error' && source !== 'none') {
-        searchContext = `\n\n─── LIVE WEB SEARCH RESULTS ───\nQuery: "${searchQuery}" (via Brave Search)\n\n${results}\n─────────────────────────────\n\nUse these real search results to give a current, accurate answer. Cite sources where relevant.`
+      if (results && source === 'brave') {
+        searchContext = `\n\n─── LIVE WEB SEARCH RESULTS (Brave Search) ───
+Query: "${query}"
+
+${results}
+──────────────────────────────────────────────
+
+Use these real-time search results in your response. Reference specific findings from the results above. Cite URLs where helpful.`
       }
     }
 
@@ -134,7 +135,6 @@ export async function POST(req: NextRequest) {
       })),
     ]
 
-    // Stream the response
     const stream = await provider.client.chat.completions.create({
       model,
       messages: allMessages,
@@ -146,9 +146,11 @@ export async function POST(req: NextRequest) {
     const readable = new ReadableStream({
       async start(controller) {
         try {
-          // Signal if search was used
-          if (searchContext && searchSource !== 'error') {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ meta: { searched: true, source: searchSource } })}\n\n`))
+          // Send search metadata first if search was used
+          if (searchSource === 'brave') {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ meta: { searched: true, source: 'brave' } })}\n\n`),
+            )
           }
 
           for await (const chunk of stream) {
@@ -173,6 +175,7 @@ export async function POST(req: NextRequest) {
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
         'X-Provider': provider.name,
+        'X-Searched': searchSource === 'brave' ? 'true' : 'false',
       },
     })
   } catch (err) {
